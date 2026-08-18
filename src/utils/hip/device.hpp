@@ -4,9 +4,6 @@
 #include <string>
 #include <hip/hip_runtime.h>
 #include <vector>
-#ifdef __HIP_PLATFORM_AMD__
-#include <rocm_smi/rocm_smi.h>
-#endif
 
 #include "utils/errorHandling.hpp"
 #include "utils/hip/hsa.hpp"
@@ -204,20 +201,16 @@ namespace util {
     }
 
     /**
-     * @brief Query how many XCDs (dies) the GPU comprises.
+     * @brief Query how many XCDs back the current logical GPU partition.
      */
     inline uint32_t getNumXCDs() {
-        static uint32_t xcdCount = [](){
+        static const uint32_t xcdCount = []() {
             #ifdef __HIP_PLATFORM_NVIDIA__
-            return 1;
-            #endif
-            #ifdef __HIP_PLATFORM_AMD__
-            util::rocmCheck(rsmi_init(0));
-            int device;
-            util::hipCheck(hipGetDevice(&device));
-            uint16_t xcdCounter;
-            util::rocmCheck(rsmi_dev_metrics_xcd_counter_get(device, &xcdCounter));
-            return static_cast<uint32_t>(xcdCounter);
+            return 1u;
+            #elif defined(__HIP_PLATFORM_AMD__)
+            return getNumXccFromKfd().value_or(1u);
+            #else
+            return 1u;
             #endif
         }();
         return xcdCount;
