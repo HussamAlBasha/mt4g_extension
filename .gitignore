@@ -11,3 +11,5 @@ dbg/*
 !results/**
 src/version.hpp
 build-*
+
+experiments/*
