@@ -3,6 +3,7 @@
 #include <vector>
 #include <string>
 #include <iostream>
+#include <optional>
 #include <hip/hip_runtime.h>
 #include <filesystem>
 #include <fstream>
@@ -26,6 +27,12 @@ namespace util {
         opts.useStdout = false;
         opts.randomize = false;
         opts.runSilently = false;
+
+        opts.warmup    = false;
+        opts.allocType = util::AllocatorType::HipMalloc;
+        opts.prefetch  = false;
+        opts.testSizeBytes = std::nullopt;
+        opts.cpuInit   = false;
 
         opts.runL3 = false;
         opts.runL2 = false;
@@ -89,6 +96,21 @@ namespace util {
             ("resourceshare", "Run Resource Sharing benchmarks",
                 cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
 
+            // ------- Main-memory USM options -------
+            ("warmup", "Run one untimed GPU first-touch/warm-up pass before timing (main-memory and L3)",
+                cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
+            ("allocator", "Memory allocator for main-memory and L3 benchmarks: hipmalloc | hipmallocmanaged | hiphostmalloc | malloc (default: hipmalloc)",
+                cxxopts::value<std::string>()->default_value("hipmalloc"))
+            ("prefetch", "Prefetch main-memory and L3 buffers after hipMallocManaged allocation",
+                cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
+            ("test-size-bytes", "Override working-set size in bytes for bandwidth benchmarks (main-memory and L3)",
+                cxxopts::value<size_t>())
+            ("cpu-init", "Initialize CPU-writable main-memory and L3 buffers from the CPU "
+                         "before GPU access. For latency this replaces the untimed GPU "
+                         "initialization kernel; bandwidth otherwise has no explicit initialization. "
+                         "Not valid with --allocator=hipmalloc (device-only memory).",
+                cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
+
             // ------- Single cache preference option -------
             // Use one string option instead of multiple booleans.
             ("cache", "Cache preference: l1 | shared | equal | auto (default: auto)",
@@ -129,13 +151,53 @@ namespace util {
         opts.randomize  = result["random"].as<bool>();
         opts.runSilently= result["quiet"].as<bool>();
 
-        // ------- Cache preference parsing -------
-        // Convert to lowercase for robust matching.
+        // Shared lowercase helper used by both allocator and cache parsing.
         auto to_lower = [](std::string s) {
             std::transform(s.begin(), s.end(), s.begin(),
                         [](unsigned char c){ return static_cast<char>(std::tolower(c)); });
             return s;
         };
+
+        // ------- Main-memory USM options -------
+        opts.warmup   = result["warmup"].as<bool>();
+        opts.prefetch = result["prefetch"].as<bool>();
+        if (result.count("test-size-bytes")) {
+            opts.testSizeBytes = result["test-size-bytes"].as<size_t>();
+        }
+
+        {
+            const std::unordered_map<std::string, util::AllocatorType> alloc_map{
+                {"hipmalloc",        util::AllocatorType::HipMalloc},
+                {"hipmallocmanaged", util::AllocatorType::HipMallocManaged},
+                {"hiphostmalloc",    util::AllocatorType::HipHostMalloc},
+                {"malloc",           util::AllocatorType::Malloc},
+            };
+            const auto alloc_str = to_lower(result["allocator"].as<std::string>());
+            if (auto it = alloc_map.find(alloc_str); it != alloc_map.end()) {
+                opts.allocType = it->second;
+            } else {
+                std::cerr << "Invalid --allocator value: '" << alloc_str
+                          << "'. Allowed: hipmalloc | hipmallocmanaged | hiphostmalloc | malloc\n";
+                std::exit(EXIT_FAILURE);
+            }
+        }
+
+        // ------- --cpu-init -------
+        opts.cpuInit  = result["cpu-init"].as<bool>();
+
+        if (opts.cpuInit && opts.allocType == util::AllocatorType::HipMalloc) {
+            std::cerr << "--cpu-init requires a CPU-writable allocator. "
+                         "--allocator=hipmalloc is device-only. "
+                         "Use hipmallocmanaged, hiphostmalloc, or malloc.\n";
+            std::exit(EXIT_FAILURE);
+        }
+
+        if (opts.prefetch && opts.allocType != util::AllocatorType::HipMallocManaged) {
+            std::cerr << "--prefetch requires --allocator=hipmallocmanaged.\n";
+            std::exit(EXIT_FAILURE);
+        }
+
+        // ------- Cache preference parsing -------
 
         const std::unordered_map<std::string, hipFuncCache_t> cache_map{
             {"l1",     hipFuncCachePreferL1},

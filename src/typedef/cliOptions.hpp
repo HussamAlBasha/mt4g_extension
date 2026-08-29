@@ -3,6 +3,9 @@
 #include <hip/hip_runtime.h>
 #include <filesystem>
 #include <string>
+#include <optional>
+
+#include "utils/hip/memory.hpp"
 
 struct CLIOptions {
     std::string fileName;             // Name of output files
@@ -14,6 +17,13 @@ struct CLIOptions {
     bool useStdout;                   // Dump final JSON result to stdout
     bool randomize;                   // Randomize P-Chase arrays if true
     bool runSilently;                 // Do not print progress information if true
+
+    // Main-memory and AMD L3 benchmark options
+    bool warmup;                      // Run one untimed warm-up kernel before timed rounds
+    util::AllocatorType allocType;    // Memory allocator for main-memory and AMD L3 benchmarks
+    bool prefetch;                    // Prefetch to device after allocation (HipMallocManaged only)
+    std::optional<size_t> testSizeBytes; // Override main-memory and AMD L3 bandwidth working-set size
+    bool cpuInit;                      // --cpu-init: CPU-first initialization (USM allocators only)
 
     // Benchmark groups
     bool runL3;

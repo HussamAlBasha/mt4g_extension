@@ -5,6 +5,7 @@
 #include <map>
 #include <numeric>
 #include <optional>
+#include <cstring>
 
 static constexpr auto SIZE_DOWN = DEFAULT_SIZE_DOWN_FACTOR;// Factor
 static constexpr auto MS_PER_SECOND = 1000.0;// ms
@@ -46,41 +47,84 @@ __global__ void mainMemoryReadBandwidthKernel(uint32v4* __restrict__ dst, uint32
     dst[tid % blockDim.x] = dummy; // prevent dead code elimination
 }
 
-double mainMemoryReadBandwidthLauncher(size_t arraySizeBytes) { 
-    util::hipDeviceReset(); 
+BandwidthResult mainMemoryReadBandwidthLauncher(
+    size_t arraySizeBytes,
+    util::AllocatorType allocType,
+    bool warmup,
+    bool prefetch,
+    bool cpuInit)
+{
+    util::hipDeviceReset();
 
-    uint32_t maxThreadsPerBlock = util::min(util::getMaxThreadsPerBlock(), util::getWarpSize() * util::getSIMDsPerCU()); 
+    uint32_t maxThreadsPerBlock = util::min(util::getMaxThreadsPerBlock(), util::getWarpSize() * util::getSIMDsPerCU());
     uint32_t maxBlocks = util::getNumberOfComputeUnits() * util::getDeviceProperties().maxBlocksPerMultiProcessor;
 
-    // Initialize device Arrays
-    // sizeof(uint32v4) = 16 bytes -> allows us to load 4 integers with one instruction -> probability 
-    // of the bandwidth being limited by the memory bandwidth rather than compute is considerably higher
-    uint32v4 *d_srcArr = util::allocateGPUMemory<uint32v4>(arraySizeBytes / sizeof(uint32v4));
-    uint32v4 *d_dstArr = util::allocateGPUMemory<uint32v4>(maxThreadsPerBlock); // total threads
+    // sizeof(uint32v4) = 16 bytes -> allows us to load 4 integers with one instruction
+    size_t srcElems = arraySizeBytes / sizeof(uint32v4);
+    size_t allocatedBytes = srcElems * sizeof(uint32v4);
+    uint32v4 *d_srcArr = util::allocateMemory<uint32v4>(srcElems, allocType);
+    uint32v4 *d_dstArr = util::allocateMemory<uint32v4>(maxThreadsPerBlock, util::AllocatorType::HipMalloc); // total threads
+
+    // Touch the complete source allocation from the CPU. Effective mapping and physical
+    // placement remain allocator- and runtime-dependent.
+    if (cpuInit) {
+        std::memset(d_srcArr, 0, allocatedBytes);
+    }
+
+    if (prefetch && allocType == util::AllocatorType::HipMallocManaged) {
+        int device;
+        util::hipCheck(hipGetDevice(&device));
+        util::hipCheck(hipMemPrefetchAsync(d_srcArr, allocatedBytes, device, 0));
+        util::hipCheck(hipDeviceSynchronize());
+    }
+
+    // Untimed complete GPU read pass. This can establish mappings and exercise translation
+    // state, but does not guarantee that the complete working set remains TLB-resident.
+    if (warmup) {
+        mainMemoryReadBandwidthKernel<<<maxBlocks, maxThreadsPerBlock>>>(d_dstArr, d_srcArr, srcElems);
+        util::hipCheck(hipDeviceSynchronize());
+    }
     
     // Use events to measure timings
     auto start = util::createHipEvent();
     auto end = util::createHipEvent();
 
-    util::hipCheck(hipDeviceSynchronize());
-    util::hipCheck(hipEventRecord(start));
-    mainMemoryReadBandwidthKernel<<<maxBlocks, maxThreadsPerBlock>>>(d_dstArr, d_srcArr, arraySizeBytes / sizeof(uint32v4));
-    util::hipCheck(hipEventRecord(end));
-    util::hipCheck(hipDeviceSynchronize());
+    std::vector<double> results(ROUNDS);
+    for (uint32_t i = 0; i < ROUNDS; ++i) {
+        util::hipCheck(hipDeviceSynchronize());
+        util::hipCheck(hipEventRecord(start));
+        mainMemoryReadBandwidthKernel<<<maxBlocks, maxThreadsPerBlock>>>(d_dstArr, d_srcArr, srcElems);
+        util::hipCheck(hipEventRecord(end));
+        util::hipCheck(hipDeviceSynchronize());
+        results[i] = util::getElapsedTimeMs(start, end) / MS_PER_SECOND;
+    }
 
-    return util::getElapsedTimeMs(start, end);
+    util::hipCheck(hipEventDestroy(start));
+    util::hipCheck(hipEventDestroy(end));
+
+    util::freeMemory(d_srcArr, allocType);
+    util::freeMemory(d_dstArr, util::AllocatorType::HipMalloc);
+
+    double testSizeGiB = (double)allocatedBytes / (double)(1 * GiB); // Convert to GiB
+    BandwidthResult br;
+    br.rounds.reserve(ROUNDS);
+    for (uint32_t i = 0; i < ROUNDS; ++i) {
+        br.rounds.push_back(testSizeGiB / results[i]);
+    }
+    br.average = testSizeGiB / util::average(results);
+    return br;
 }
 
 namespace benchmark {
-    double measureMainMemoryReadBandwidth(size_t mainMemorySizeBytes) {
+    BandwidthResult measureMainMemoryReadBandwidth(
+        size_t mainMemorySizeBytes,
+        util::AllocatorType allocType,
+        bool warmup,
+        bool prefetch,
+        bool cpuInit)
+    {
         size_t testSizeBytes = mainMemorySizeBytes / SIZE_DOWN; // Divide by SIZE_DOWN to avoid too large memory allocations
-        double testSizeGiB = (double)testSizeBytes / (double)(1 * GiB); // Convert to GiB
-
-        std::vector<double> results(ROUNDS);
-        for (uint32_t i = 0; i < ROUNDS; ++i) {
-            results[i] = mainMemoryReadBandwidthLauncher(testSizeBytes) / MS_PER_SECOND;
-        }
-        
-        return testSizeGiB / util::average(results); 
+        return mainMemoryReadBandwidthLauncher(testSizeBytes, allocType, warmup, prefetch,
+                                               cpuInit);
     }
 }

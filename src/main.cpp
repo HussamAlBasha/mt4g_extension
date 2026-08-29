@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <vector>
 #include <algorithm>
+#include <cstdint>
 #include <memory>
 #include <iostream>
 #include <nlohmann/json.hpp>
@@ -32,6 +33,12 @@ int main(int argc, char* argv[]) {
 
     util::hipCheck(hipSetDevice(opts.deviceId));
     auto deviceProperties = util::getDeviceProperties();
+
+    const char* allocName =
+        opts.allocType == util::AllocatorType::HipMalloc        ? "hipmalloc"        :
+        opts.allocType == util::AllocatorType::HipMallocManaged ? "hipmallocmanaged" :
+        opts.allocType == util::AllocatorType::HipHostMalloc    ? "hiphostmalloc"    :
+                                                                  "malloc";
 
     std::string fancyName = deviceProperties.name;
 
@@ -397,16 +404,44 @@ int main(int argc, char* argv[]) {
             }
 
             std::cout << "[L3] Read Bandwidth" << std::endl;
-            result["memory"]["l3"]["readBandwidth"] = {
-                {"value", benchmark::amd::measureL3ReadBandwidth(l3Size.value())},
-                {"unit", "GiB/s"}
+            size_t l3TestSize = opts.testSizeBytes.value_or(l3Size.value());
+            const size_t l3AllocatedBytes =
+                (l3TestSize / sizeof(uint32v4)) * sizeof(uint32v4);
+            result["memory"]["l3"]["config"] = {
+                {"allocator", allocName},
+                {"warmup", opts.warmup},
+                {"cpuInit", opts.cpuInit},
+                {"prefetch", opts.prefetch},
+                {"requestedSizeBytes", l3TestSize},
+                {"allocatedSizeBytes", l3AllocatedBytes},
+                {"initializationMethod", opts.cpuInit ? "cpu_memset" : "none"},
+                {"firstGpuKernelAccessPhase", opts.warmup ? "warmup" : "timed_round_0"},
+                {"prefetchPerformed",
+                    opts.prefetch && opts.allocType == util::AllocatorType::HipMallocManaged},
+                {"warmupPerformed", opts.warmup}
             };
+            {
+                auto bw = benchmark::amd::measureL3ReadBandwidth(
+                    l3TestSize, opts.allocType, opts.warmup, opts.prefetch,
+                    opts.cpuInit);
+                result["memory"]["l3"]["readBandwidth"] = {
+                    {"value", bw.average},
+                    {"unit", "GiB/s"},
+                    {"rounds", bw.rounds}
+                };
+            }
 
             std::cout << "[L3] Write Bandwidth" << std::endl;
-            result["memory"]["l3"]["writeBandwidth"] = {
-                {"value", benchmark::amd::measureL3WriteBandwidth(l3Size.value())},
-                {"unit", "GiB/s"}
-            };
+            {
+                auto bw = benchmark::amd::measureL3WriteBandwidth(
+                    l3TestSize, opts.allocType, opts.warmup, opts.prefetch,
+                    opts.cpuInit);
+                result["memory"]["l3"]["writeBandwidth"] = {
+                    {"value", bw.average},
+                    {"unit", "GiB/s"},
+                    {"rounds", bw.rounds}
+                };
+            }
 
             /* Not working yet
             if (opts.graphs) {
@@ -702,24 +737,93 @@ int main(int argc, char* argv[]) {
     if (opts.runMainMemory) {
         std::cout << "[Main Memory] Starting Benchmarks" << std::endl;
 
+        // Emit requested run configuration into JSON.
+        {
+            result["memory"]["main"]["config"] = {
+                {"allocator",  allocName},
+                {"warmup",     opts.warmup},
+                {"cpuInit",    opts.cpuInit},
+                {"prefetch",   opts.prefetch},
+                {"testSizeBytes", opts.testSizeBytes.has_value()
+                                  ? nlohmann::json(opts.testSizeBytes.value())
+                                  : nlohmann::json(nullptr)}
+            };
+        }
+
         std::cout << "[Main Memory] Latency" << std::endl;
-        CacheLatencyResult mainMemLatency = benchmark::measureMainMemoryLatency();
+        CacheLatencyResult mainMemLatency = benchmark::measureMainMemoryLatency(
+            opts.allocType, opts.warmup, opts.prefetch, opts.cpuInit);
         result["memory"]["main"]["latency"] = mainMemLatency;
+        const char* latencyInitialization =
+            opts.allocType == util::AllocatorType::HipMalloc ? "hip_memcpy" :
+            opts.cpuInit                                     ? "cpu_memcpy" :
+                                                               "gpu_init_kernel";
+        const char* latencyFirstGpuKernelPhase =
+            opts.allocType != util::AllocatorType::HipMalloc && !opts.cpuInit
+                ? "initialization"
+                : (opts.warmup ? "warmup" : "timed_measurement");
+        result["memory"]["main"]["latency"]["config"] = {
+            {"allocatedSizeBytes", 1 * GiB},
+            {"strideBytes", 1 * KiB},
+            {"initializationMethod", latencyInitialization},
+            {"firstGpuKernelAccessPhase", latencyFirstGpuKernelPhase},
+            {"prefetchPerformed",
+                opts.prefetch && opts.allocType == util::AllocatorType::HipMallocManaged},
+            {"warmupPerformed", opts.warmup}
+        };
         if (opts.rawData) {
             util::writeVectorToFile(mainMemLatency.timings, (graphDir / (fancyFileName + "__Main_Memory_Latency.txt")).string());
         }
 
         std::cout << "[Main Memory] Read Bandwidth" << std::endl;
-        result["memory"]["main"]["readBandwidth"] = {
-            {"value", benchmark::measureMainMemoryReadBandwidth(deviceProperties.totalGlobalMem)},
-            {"unit", "GiB/s"}
-        };
+        // measureMainMemoryReadBandwidth divides its argument by SIZE_DOWN internally.
+        // Multiply back so opts.testSizeBytes is the actual working-set size streamed.
+        size_t mainTestSize = opts.testSizeBytes.has_value()
+            ? opts.testSizeBytes.value() * DEFAULT_SIZE_DOWN_FACTOR
+            : deviceProperties.totalGlobalMem;
+        const size_t mainBandwidthRequestedBytes = mainTestSize / DEFAULT_SIZE_DOWN_FACTOR;
+        const size_t mainBandwidthAllocatedBytes =
+            (mainBandwidthRequestedBytes / sizeof(uint32v4)) * sizeof(uint32v4);
+        {
+            auto bw = benchmark::measureMainMemoryReadBandwidth(
+                mainTestSize, opts.allocType, opts.warmup, opts.prefetch,
+                opts.cpuInit);
+            result["memory"]["main"]["readBandwidth"] = {
+                {"value", bw.average},
+                {"unit", "GiB/s"},
+                {"rounds", bw.rounds},
+                {"config", {
+                    {"requestedSizeBytes", mainBandwidthRequestedBytes},
+                    {"allocatedSizeBytes", mainBandwidthAllocatedBytes},
+                    {"initializationMethod", opts.cpuInit ? "cpu_memset" : "none"},
+                    {"firstGpuKernelAccessPhase", opts.warmup ? "warmup" : "timed_round_0"},
+                    {"prefetchPerformed",
+                        opts.prefetch && opts.allocType == util::AllocatorType::HipMallocManaged},
+                    {"warmupPerformed", opts.warmup}
+                }}
+            };
+        }
 
         std::cout << "[Main Memory] Write Bandwidth" << std::endl;
-        result["memory"]["main"]["writeBandwidth"] = {
-            {"value", benchmark::measureMainMemoryWriteBandwidth(deviceProperties.totalGlobalMem)},
-            {"unit", "GiB/s"}
-        };
+        {
+            auto bw = benchmark::measureMainMemoryWriteBandwidth(
+                mainTestSize, opts.allocType, opts.warmup, opts.prefetch,
+                opts.cpuInit);
+            result["memory"]["main"]["writeBandwidth"] = {
+                {"value", bw.average},
+                {"unit", "GiB/s"},
+                {"rounds", bw.rounds},
+                {"config", {
+                    {"requestedSizeBytes", mainBandwidthRequestedBytes},
+                    {"allocatedSizeBytes", mainBandwidthAllocatedBytes},
+                    {"initializationMethod", opts.cpuInit ? "cpu_memset" : "none"},
+                    {"firstGpuKernelAccessPhase", opts.warmup ? "warmup" : "timed_round_0"},
+                    {"prefetchPerformed",
+                        opts.prefetch && opts.allocType == util::AllocatorType::HipMallocManaged},
+                    {"warmupPerformed", opts.warmup}
+                }}
+            };
+        }
 
         std::cout << "[Main Memory] Benchmarks finished" << std::endl;
     }

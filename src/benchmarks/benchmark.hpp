@@ -8,6 +8,7 @@
 #include "typedef/cacheSizeResult.hpp"
 #include "typedef/cacheLineSizeResult.hpp"
 #include "typedef/cacheLatencyResult.hpp"
+#include "typedef/bandwidthResult.hpp"
 #include "typedef/vectorTypes.hpp"
 
 #include "benchmarks/size/cacheSize/l1CacheSize.hpp"
