@@ -493,8 +493,9 @@ int main(int argc, char* argv[]) {
             };
 
             std::cout << "[L3] Latency" << std::endl;
-            CacheLatencyResult l3Latency = timed("amd_l3Latency", [&] { return benchmark::amd::measureL3Latency(deviceProperties.l2CacheSize, 128); });
+            CacheLatencyResult l3Latency = timed("amd_l3Latency", [&] { return benchmark::amd::measureL3Latency(deviceProperties.l2CacheSize, 128, opts.allocType); });
             result["memory"]["l3"]["latency"] = l3Latency;
+            result["memory"]["l3"]["latency"]["allocator"] = allocatorName;
 
             /* Not working yet
             std::cout << "[L3] Fetch Granularity" << std::endl;
@@ -1044,8 +1045,9 @@ int main(int argc, char* argv[]) {
         std::cout << "[Main Memory] Starting Benchmarks" << std::endl;
 
         std::cout << "[Main Memory] Latency" << std::endl;
-        CacheLatencyResult mainMemLatency = timed("mainMemoryLatency", [&] { return benchmark::measureMainMemoryLatency(); });
+        CacheLatencyResult mainMemLatency = timed("mainMemoryLatency", [&] { return benchmark::measureMainMemoryLatency(opts.allocType); });
         result["memory"]["main"]["latency"] = mainMemLatency;
+        result["memory"]["main"]["latency"]["allocator"] = allocatorName;
         if (opts.rawData) {
             util::writeVectorToFile(mainMemLatency.timings, (graphDir / (fancyFileName + "__Main_Memory_Latency.txt")).string());
         }

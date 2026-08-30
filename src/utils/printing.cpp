@@ -74,7 +74,7 @@ namespace util {
                 cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
             ("t,timing", "Measure and print wall-clock time of the whole run and each individual benchmark",
                 cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
-            ("allocator", "Memory allocator for main-memory and L3 bandwidth sweeps: hipmalloc | hipmallocmanaged | hiphostmalloc | malloc (default: hipmalloc)",
+            ("allocator", "Memory allocator for L3/main-memory latency and bandwidth sweeps: hipmalloc | hipmallocmanaged | hiphostmalloc | malloc (default: hipmalloc)",
                 cxxopts::value<std::string>()->default_value("hipmalloc"))
 
             // ------- Benchmark group toggles -------
