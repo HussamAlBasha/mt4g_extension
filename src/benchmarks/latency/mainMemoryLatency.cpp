@@ -54,15 +54,20 @@ __global__ void mainMemoryLatencyScrubKernel(const uint32_t *source, size_t coun
     const size_t threadCount = gridDim.x * blockDim.x;
     uint32_t accumulator = 0;
 
-    // Ordinary loads populate the cache hierarchy with source-buffer lines,
-    // displacing measured-array lines left behind by the initialization copy.
+    // Across all threads, read one uint32_t every 64 bytes from the source.
+    // Assuming 64-byte cache lines, this touches every source cache line;
+    // a cache miss can fetch the entire line.
+    // These ordinary loads fill caches with source-buffer lines, aiming to
+    // evict measured-array lines left by initialization.
+    // This is not a guaranteed cache flush.
     for (size_t index = threadIndex * wordsPerCacheLine;
          index < count;
          index += threadCount * wordsPerCacheLine) {
         accumulator ^= source[index];
     }
 
-    // Give every thread a unique output so none of the scrub loads are dead.
+    // Store each thread's accumulator separately so the loads have an
+    // observable result and threads do not overwrite each other's output.
     sink[threadIndex] = accumulator;
 }
 

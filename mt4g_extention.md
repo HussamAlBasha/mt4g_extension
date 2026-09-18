@@ -1,273 +1,229 @@
-# MT4G Extension Change Log
+# Configurable Allocator Extension for MT4G Memory Benchmarks
 
-This document tracks source-code changes made on the `cdna3-and-bw` branch.
-Add a dated entry whenever the branch gains or changes functionality.
+This document explains how MT4G selects the allocator for the measured working
+set in its L3 and main-memory bandwidth and latency benchmarks. It describes
+which buffers use the selected allocator, how each benchmark prepares and
+measures them, and how the choice appears in the results.
 
-## 2026-08-30: Configurable memory allocator for bandwidth sweeps
+Allocator selection changes the backing memory while keeping each benchmark's
+access pattern and timed metric fixed. Auxiliary buffers continue to use device
+memory. The bandwidth and L3-latency benchmarks retain their existing
+measurement sequences. Main-memory latency uses the same initialization and
+cache preparation for every allocator to reduce cache effects before timing.
 
-Commit: `260a7fb` (`Add allocator selector for main-memory and L3 bandwidth sweeps`)
+## Scope
 
-### Purpose
+The extension covers these benchmark implementations:
 
-Allow the optimal-search L3 and main-memory bandwidth benchmarks to compare
-different memory allocation mechanisms while preserving the existing benchmark
-lifecycle and warm-up behavior.
+- `src/benchmarks/bandwidth/mainMemoryReadBandwidth.cpp/.hpp`
+- `src/benchmarks/bandwidth/mainMemoryWriteBandwidth.cpp/.hpp`
+- `src/benchmarks/bandwidth/amd_l3ReadBandwidth.cpp/.hpp`
+- `src/benchmarks/bandwidth/amd_l3WriteBandwidth.cpp/.hpp`
+- `src/benchmarks/latency/mainMemoryLatency.cpp/.hpp`
+- `src/benchmarks/latency/amd_l3Latency.cpp/.hpp`
 
-### Supported allocators
+For bandwidth, allocator selection applies specifically to the four
+optimal-search sweep functions:
 
-The `util::AllocatorType` enum and its allocation/deallocation dispatch are
-defined in `src/utils/hip/memory.hpp`.
+- `benchmark::measureMainMemoryReadBandwidthSweep`
+- `benchmark::measureMainMemoryWriteBandwidthSweep`
+- `benchmark::amd::measureL3ReadBandwidthSweep`
+- `benchmark::amd::measureL3WriteBandwidthSweep`
 
-| CLI value | Allocation | Deallocation | Notes |
-|---|---|---|---|
-| `hipmalloc` | `hipMalloc` | `hipFree` | Default device-memory allocator |
-| `hipmallocmanaged` | `hipMallocManaged` | `hipFree` | Demand-paged managed memory |
-| `hiphostmalloc` | `hipHostMalloc` | `hipHostFree` | Uses `hipHostMallocNonCoherent` on AMD and the portable default elsewhere |
-| `malloc` | `::malloc` | `::free` | Intended for HMM-accessible CPU memory on MI300A; requires `XNACK=1` |
+The non-sweep bandwidth functions, and all L1 and L2 benchmarks, continue to
+use `hipMalloc`. The allocator applies to the two latency benchmarks whenever
+their corresponding L3 or main-memory benchmark group runs; latency does not
+depend on `--optimal`.
 
-### Command-line interface
+## Unified allocator path
 
-The new option is:
+The command-line interface exposes one option for all six benchmarks:
 
 ```text
 --allocator hipmalloc|hipmallocmanaged|hiphostmalloc|malloc
 ```
 
-Its default is `hipmalloc`. Invalid values terminate with an error that lists
-the accepted values.
+`hipmalloc` is the default. The parser is case-insensitive and rejects an
+unknown value with the list of accepted values. The selected value is stored as
+`util::AllocatorType` in `CLIOptions` and passed through `main.cpp` to the
+public benchmark function declared in each `.hpp` file. Those declarations use
+`HipMalloc` as a default argument, which preserves the previous behavior for
+callers that do not provide an allocator.
 
-Examples:
+Within each `.cpp` file, the selection reaches the launcher that owns the
+measured working set. Allocator-dependent paths create that set through
+`util::allocateMemory`, run the benchmark-specific preparation and timed
+access, and release it with the matching `util::freeMemory` operation:
 
-```bash
-./build/mt4g --optimal --l3 --allocator hipmallocmanaged
-./build/mt4g --optimal --memory --allocator hiphostmalloc
-./build/mt4g --optimal --l3 --memory --allocator malloc
+```text
+--allocator
+    -> CLIOptions::allocType
+    -> public benchmark function
+    -> benchmark launcher
+    -> allocate measured working set
+    -> prepare/warm up and measure
+    -> matching deallocation
 ```
 
-The selected value is written to the JSON output as `bandwidthAllocator` under
-the corresponding `memory.l3` or `memory.main` object.
+The common dispatch is defined in `src/utils/hip/memory.hpp`:
 
-### Affected benchmarks
+| CLI value | Allocation | Deallocation | Intended memory path |
+|---|---|---|---|
+| `hipmalloc` | `hipMalloc` | `hipFree` | Device memory; the backward-compatible default |
+| `hipmallocmanaged` | `hipMallocManaged` | `hipFree` | HIP managed memory |
+| `hiphostmalloc` | `hipHostMalloc` | `hipHostFree` | Host allocation visible to the GPU; AMD uses `hipHostMallocNonCoherent` |
+| `malloc` | `::malloc` | `::free` | CPU heap accessed by the GPU through HMM on MI300A; requires `XNACK=1` |
 
-Allocator selection applies only to these optimal-search sweep functions:
+The only equivalent shortcut is the `hipmalloc` branch of L3 latency, which
+retains the original `allocateGPUMemory(hostChaseArray)` host-to-device copy.
+That helper also uses `hipMalloc`; the other three L3-latency modes use the
+common allocator dispatch and an explicit GPU initialization kernel.
 
-- `benchmark::amd::measureL3ReadBandwidthSweep`
-- `benchmark::amd::measureL3WriteBandwidthSweep`
-- `benchmark::measureMainMemoryReadBandwidthSweep`
-- `benchmark::measureMainMemoryWriteBandwidthSweep`
+No managed-memory prefetch, CPU-first-touch mode, configurable warm-up, or
+working-set-size override is introduced. Consequently, the allocator is the
+independent variable while each benchmark's access pattern remains fixed.
 
-The non-sweep bandwidth benchmarks and the L1/L2 benchmarks continue to use
-`hipMalloc`.
+## Effect on each benchmark
 
-### Buffer selection
+| Benchmark | Selectable measured allocation | Allocation that stays on `hipMalloc` | Measurement lifecycle |
+|---|---|---|---|
+| Main-memory read bandwidth sweep | Large source array | Small destination/sink array | Warm-up followed by one timed streaming pass per block/thread configuration |
+| Main-memory write bandwidth sweep | Large destination array | No auxiliary data array | Warm-up followed by one timed streaming pass per block/thread configuration |
+| AMD L3 read bandwidth sweep | Source working set | Small destination/sink array | Existing L3 warm-up and block/thread/repetition search |
+| AMD L3 write bandwidth sweep | Destination working set | No auxiliary data array | Existing L3 warm-up and block/thread/repetition search |
+| Main-memory latency | 1 GiB randomized pointer-chase array | Initialization source, scrub sink, and timing-results buffers | Cache scrub, partial pointer-chase warm-up, then per-hop timing with cache-bypassing loads |
+| AMD L3 latency | Pointer-chase array sized to exceed L2 | Initialization source when needed and timing-results buffer | Complete untimed traversal to establish L3 residency, then per-hop timing of L3 reads |
 
-For read bandwidth, only the large source working set uses the selected
-allocator. The small destination buffer remains device memory because it only
-stores the final value used to prevent dead-code elimination.
+This separation is deliberate. A read benchmark selects the allocator for its
+large source because that is the region supplying the measured traffic. A
+write benchmark selects it for the large destination because that region
+receives the measured traffic. Latency benchmarks select it for the
+pointer-chase array. Small output and timing buffers do not represent the
+memory path under test, so changing their allocator would add an unrelated
+variable.
 
-For write bandwidth, the large destination working set is the benchmarked
-buffer, so it uses the selected allocator.
+### Bandwidth sweep lifecycle
 
-### Allocation and warm-up lifecycle
-
-Each tested configuration gets a fresh allocation and its own warm-up:
+Every tested sweep configuration invokes its launcher independently. The
+lifecycle is therefore:
 
 ```text
 for each block/thread/repetition configuration:
-    allocate with the selected allocator
-    run the existing untimed warm-up
-    run the timed measurement
-    free with the matching deallocator
+    allocate a fresh working set with the selected allocator
+    run the existing untimed warm-up on that allocation
+    run the timed measurement on the same allocation
+    free it with the matching deallocator
 ```
 
-This preserves fair comparison between configurations by preventing allocation
-state, residency, or earlier configurations from influencing later ones.
+This gives each configuration a fresh allocation and warm-up rather than
+reusing the previous configuration's working set. The AMD L3 sweeps retain
+their repetition axis and 512-repetition warm-up. The main-memory sweeps retain
+a large working set of up to 1 GiB and four warm-up passes, but `repsTested`
+contains only `1`.
+That value means one timed streaming pass for each block/thread configuration,
+not one launcher call for the entire sweep. Repeating the timed pass over the
+same bounded region could turn the main-memory test into a cache-bandwidth
+measurement.
 
-For main-memory sweeps, `repsTested` contains only `1`. This means one streaming
-pass per block/thread configuration; it does not mean the launcher is called
-only once for the complete sweep.
+### Main-memory latency lifecycle
 
-Warm-up remains mandatory and internal to the benchmark. No configurable
-warm-up option was added.
+Main-memory latency uses GPU initialization followed by cache preparation to
+reduce the chance that initialization leaves measured-array data in the MI300A
+MALL. The same sequence is used for all four allocators:
 
-### Source files changed
+1. Generate a randomized pointer chain on the CPU. The array is 1 GiB, the
+   stride is 1 KiB, and the resulting chain has 1,048,576 nodes.
+2. Allocate the pointer-chase array with the selected allocator.
+3. Copy the host-generated chain to a temporary `hipMalloc` buffer, then use an
+   untimed GPU kernel to initialize the selected allocation.
+4. Reuse the separate 1 GiB source buffer as a scrubber by reading one word from
+   each 64-byte cache line with ordinary cache-allocating loads. The touched
+   lines span four times the MI300A's 256 MiB MALL capacity and are intended to
+   displace measured-array lines loaded during initialization. This is not a
+   guaranteed cache flush.
+5. Free the initialization and scrub buffers.
+6. Perform 2,048 untimed dependent loads with
+   `__forceBypassAllCacheReads`, continue from the resulting pointer index, and
+   time the next 2,048 dependent loads with the same intrinsic.
 
-- `src/utils/hip/memory.hpp`
-- `src/typedef/cliOptions.hpp`
-- `src/utils/printing.cpp`
-- `src/main.cpp`
-- `src/benchmarks/bandwidth/mainMemoryReadBandwidth.cpp/.hpp`
-- `src/benchmarks/bandwidth/mainMemoryWriteBandwidth.cpp/.hpp`
-- `src/benchmarks/bandwidth/amd_l3ReadBandwidth.cpp/.hpp`
-- `src/benchmarks/bandwidth/amd_l3WriteBandwidth.cpp/.hpp`
-- `README.md`
+Warm-up and measurement therefore visit 4,096 distinct nodes, well below the
+1,048,576-node chain length, and the timed traversal does not wrap to lines
+visited by the warm-up. Every measured hop is bracketed by its own `__timer()`
+calls and reported in cycles. A separate extra result slot makes the final
+pointer index observable without overwriting any of the 2,048 timing samples.
 
-### Validation
+### AMD L3 latency lifecycle
 
-- Full CMake build completed successfully for `gfx942` with ROCm 7.2.
-- `--help` displays the allocator option.
-- Invalid allocator values are rejected during CLI parsing.
-- Existing unrelated `cuIdx` unused-variable warnings remain.
-- Runtime bandwidth measurements for every allocator are not yet recorded here.
+The L3 latency benchmark preserves the original host-to-device initialization
+path for `hipmalloc`. For the other allocators, it allocates the pointer-chase
+array with the selected mechanism, copies the generated chain first to a
+temporary `hipMalloc` buffer, and initializes the selected allocation with an
+untimed GPU copy kernel.
 
-### Deferred work
+After initialization, the original first loop in `l3LatencyKernel` still walks
+the complete pointer cycle with `__l3Read`. This traversal evicts the working
+set from L2 while establishing it in L3. Only the subsequent dependent loads
+are timed. Removing the traversal would mix cold-access, mapping, or migration
+costs into a benchmark intended to report L3-hit latency.
 
-The following options from the develop-branch allocator work were deliberately
-not ported in this step:
+## Result metadata
 
-- managed-memory prefetch
-- working-set size override
-- CPU-side initialization
-- configurable warm-up
+The chosen allocator is recorded in the JSON result so measurements remain
+self-describing:
 
-If any of these are added later, document their measurement semantics and
-affected benchmarks in a new dated section rather than silently changing this
-benchmark lifecycle.
+| Result path | Applies to |
+|---|---|
+| `memory.l3.bandwidthAllocator` | L3 read and write bandwidth sweeps |
+| `memory.main.bandwidthAllocator` | Main-memory read and write bandwidth sweeps |
+| `memory.l3.latency.allocator` | L3 latency |
+| `memory.main.latency.allocator` | Main-memory latency |
 
-## 2026-08-30: Configurable allocator for main-memory latency
+The two bandwidth fields are emitted only when optimal search runs, matching
+the scope of allocator selection for bandwidth. The latency fields are nested
+inside their respective latency results.
 
-Commit: pending
+## Cross-cutting source changes
 
-### Purpose
+The twelve benchmark files implement the per-benchmark portion of the
+extension: each header accepts `util::AllocatorType`, and each implementation
+uses it for the measured allocation and its matching deallocation. The shared
+plumbing is implemented by these files:
 
-Extend `--allocator` to the main-memory pointer-chase latency benchmark as the
-first latency step. L3 latency is intentionally unchanged and will be evaluated
-separately.
+- `src/utils/hip/memory.hpp`: defines `AllocatorType` and the allocation/free
+  dispatch.
+- `src/typedef/cliOptions.hpp`: stores the selected allocator.
+- `src/utils/printing.cpp`: declares and validates `--allocator`.
+- `src/main.cpp`: forwards the selection to all six benchmarks and records it
+  in the JSON result.
+- `README.md`: documents the user-facing option and its scope.
 
-### Behavior and design decisions
+## Preserved invariants and limitations
 
-The 1 GiB randomized pointer-chase array uses the selected allocator. All
-allocator modes use the same GPU-side initialization path; there is no special
-direct-copy path for `hipmalloc`. The timing-results buffer remains ordinary
-device memory because it is only an output of the timing kernel and is not the
-memory whose latency is measured.
+- `hipmalloc` remains the default, preserving earlier runs and direct API calls.
+- Timed regions are not made allocator-specific; main-memory latency uses one
+  common preparation path for every allocator.
+- Only the measured working set uses the selected allocator; control and result
+  buffers remain device allocations.
+- Main-memory bandwidth still measures one timed streaming pass per tested
+  launch configuration.
+- L3 latency still measures a warmed L3 working set. Main-memory latency uses
+  cache preparation and cache-bypassing dependent loads to limit cache effects
+  from initialization and warm-up.
+- Ordinary `malloc` depends on GPU access to CPU heap memory through HMM and is
+  therefore expected to fail on the target MI300A configuration when XNACK is
+  disabled.
 
-The cache-safe initialization, scrub, and partial warm-up sequence in the next
-dated section is the authoritative lifecycle for this benchmark. No
-configurable warm-up, managed-memory prefetch, or CPU-first-touch option was
-added.
+## Recorded validation
 
-The selected allocator is written to JSON as
-`memory.main.latency.allocator`. The existing
-`memory.main.bandwidthAllocator` field remains specific to the bandwidth
-sweeps.
-
-### Source files changed
-
-- `src/benchmarks/latency/mainMemoryLatency.cpp/.hpp`
-- `src/utils/hip/memory.hpp`
-- `src/typedef/cliOptions.hpp`
-- `src/utils/printing.cpp`
-- `src/main.cpp`
-- `README.md`
-
-### Validation
-
-- CMake rebuild completed successfully for `gfx942` with ROCm 7.2.
-- Existing unrelated unused-variable warnings remain.
-- Final cache-safety and runtime validation are recorded in the next section.
-
-## 2026-08-31: Cache-safe main-memory latency initialization
-
-Commit: pending
-
-### Purpose
-
-Prevent the main-memory latency benchmark from measuring MALL hits introduced
-by either a complete pointer-chain warm-up or allocator-specific initialization.
-
-### Behavior and design decisions
-
-Every allocator now uses the same initialization sequence:
-
-```text
-generate the randomized pointer chain on the CPU
-allocate the measured array with the selected allocator
-copy the pointer chain into it from an untimed GPU kernel
-read one word from every 64-byte line of the separate 1 GiB source buffer
-perform 2,048 untimed pointer-chase hops
-continue from that index and time the next 2,048 distinct hops
-```
-
-The source-buffer traversal uses ordinary cache-allocating loads. Its 1 GiB
-active cache-line footprint is four times the MI300A's 256 MiB MALL, displacing
-measured-array lines left by initialization. The source is then freed before
-measurement. The final pointer index is written to a separate result slot, so
-all 2,048 timing samples remain valid.
-
-With a 1 KiB chain stride, the 1 GiB array contains 1,048,576 pointer-chain
-nodes. Warm-up and measurement together visit only 4,096 nodes, so the chain
-does not wrap and a timed hop cannot revisit a line touched by the warm-up.
-Both phases use `__forceBypassAllCacheReads`. Each measured hop is bracketed by
-its own `__timer()` calls and is reported in cycles; no batched timing or
-assumed shader-clock conversion is part of this benchmark.
-
-### Validation
-
-- The Release build completed successfully for `gfx942` with ROCm 7.2.
-- Disassembly confirms that the scrub kernel uses ordinary
-  `global_load_dword` instructions without non-temporal or cache-bypass flags.
-- The allocator/partition matrix completed for SPX, TPX, and CPX with XNACK on
-  and off. Device, managed, and host allocations completed in every mode;
-  ordinary `malloc` completed with XNACK enabled and produced the expected
-  failure with XNACK disabled.
-- Runtime results keep main-memory latency clearly above L3 latency across the
-  successful allocator and partition combinations.
-
-## 2026-08-30: Configurable allocator for L3 latency
-
-Commit: pending
-
-### Purpose
-
-Extend `--allocator` to the AMD L3 pointer-chase latency benchmark while
-preserving its existing L3 cache warm-up behavior.
-
-### Behavior and design decisions
-
-The pointer-chase working set uses the selected allocator. The timing-results
-buffer remains ordinary device memory. For `hipmalloc`, initialization retains
-the original host-to-device copy path. For the other allocators, a temporary
-`hipMalloc` buffer receives the generated pointer chain and an untimed GPU
-kernel copies it into the selected allocation.
-
-The existing first loop in `l3LatencyKernel` remains unchanged. It traverses
-the complete pointer cycle before timing, evicting the working set from L2 and
-placing it in L3. Removing this traversal would measure cold first-access,
-mapping, and migration costs instead of L3-hit latency.
-
-The selected allocator is written to JSON as
-`memory.l3.latency.allocator`. The existing
-`memory.l3.bandwidthAllocator` field remains specific to the bandwidth sweeps.
-
-### Source files changed
-
-- `src/benchmarks/latency/amd_l3Latency.cpp/.hpp`
-- `src/utils/hip/memory.hpp`
-- `src/typedef/cliOptions.hpp`
-- `src/utils/printing.cpp`
-- `src/main.cpp`
-- `README.md`
-
-### Validation
-
-- Full CMake build completed successfully for `gfx942` with ROCm 7.2.
-- Runtime L3-latency measurements for all allocators are not yet recorded.
-
-## Entry template
-
-```markdown
-## YYYY-MM-DD: Change title
-
-Commit: `<commit>`
-
-### Purpose
-
-### Behavior and design decisions
-
-### Source files changed
-
-### Validation
-
-### Follow-up work
-```
+- A Release build for `gfx942` completed with ROCm 7.2.
+- `--help` displayed the allocator option, and invalid values were rejected by
+  command-line parsing.
+- Disassembly confirmed that the main-memory scrub kernel uses ordinary
+  `global_load_dword` instructions without cache-bypass or non-temporal flags.
+- Main-memory latency was exercised for SPX, TPX, and CPX with XNACK enabled
+  and disabled. Device, managed, and host allocations completed in every mode;
+  `malloc` completed with XNACK enabled and failed as expected when it was
+  disabled.
+- Successful main-memory latency results remained clearly above L3 latency,
+  consistent with the intended cache preparation.
+- A complete runtime bandwidth matrix for every allocator has been recorded.
