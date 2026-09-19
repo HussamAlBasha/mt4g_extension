@@ -12,4 +12,17 @@ dbg/*
 src/version.hpp
 build-*
 
-experiments/*
+# Track experiment scripts and instructions, not recorded measurements.
+/experiments/**
+!/experiments/
+!/experiments/**/
+!/experiments/**/*.py
+!/experiments/**/*.sh
+!/experiments/**/README.md
+
+/experiments/**/runs/
+/experiments/**/old_runs/
+/experiments/**/logs/
+/experiments/**/old_logs/
+/experiments/**/analysis/
+/experiments/**/__pycache__/
