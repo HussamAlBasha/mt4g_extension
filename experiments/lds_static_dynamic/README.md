@@ -4,20 +4,25 @@ This experiment compares two ways MT4G allocates a 32 KiB LDS array: dynamic `ex
 
 ## Run on Viper
 
-Run from this directory. The submit script requests SPX, TPX, and CPX with `--mi300-partition`. Each mode uses three exclusive nodes; each node runs ten paired static and dynamic measurements on logical device 0. The order alternates within each node. XNACK is fixed at 1, and the worker checks the active partition before and after measurement.
+Run from this directory. Each mode uses three exclusive nodes; each node runs ten paired static and dynamic measurements on logical device 0. The order alternates within each node. XNACK is fixed at 1, and the worker checks the active partition before and after measurement.
 
 ```bash
-./submit.sh --dry-run
-./submit.sh --submit
+mkdir -p logs
+for mode in spx tpx cpx; do
+    sbatch --job-name="mt4g_lds_${mode}" \
+        --mi300-partition="$mode" \
+        --export="ALL,MODE=$mode" \
+        job.sh
+done
 ```
 
-To make a shorter run, set an even number of pairs so the execution order remains balanced:
+This submits three jobs, one for each partition mode. To make a shorter run, export an even number of pairs before submitting so the execution order remains balanced:
 
 ```bash
-REPETITIONS=2 ./submit.sh --submit
+export REPETITIONS=2
 ```
 
-The default ten pairs produce 30 matched pairs per mode. `ALLOW_DIRTY=0` requires a clean benchmark source tree; use `ALLOW_DIRTY=1` only for a smoke test. You may also set `MT4G_BIN`, `ROCM_MODULE`, or `WALLTIME` when submitting.
+The default ten pairs produce 30 matched pairs per mode. `ALLOW_DIRTY=0` requires a clean benchmark source tree; use `ALLOW_DIRTY=1` only for a smoke test. `MT4G_BIN` and `ROCM_MODULE` can override the executable and ROCm module.
 
 ## Analyze
 
