@@ -15,13 +15,13 @@ This submits one Slurm job with one worker on each of three nodes. With the defa
 
 ## Regenerate the analysis
 
-From `experiments/CPX_sweep`, with the retained `runs/cpx_11360825` data available:
+From `experiments/CPX_sweep`, analyze a specific completed run with:
 
 ```bash
-python3 refresh_analysis.py
+python3 refresh_analysis.py --run runs/cpx_<job-id>
 ```
 
-The command validates the 432 runs and rebuilds the descriptive results under `analysis/`. It calculates the twelve-run average for each device, within-package device ranges, package-balanced node averages, and common-launch comparisons. The analysis uses only the Python standard library.
+If `--run` is omitted, the script selects the `runs/cpx_<job-id>` directory with the highest numeric job ID. The command validates the 432 runs and rebuilds the descriptive results under `analysis/`. It calculates the twelve-run average for each device, within-package device ranges, package-balanced node averages, and common-launch comparisons. The analysis uses only the Python standard library.
 
 ## Python scripts
 
@@ -29,9 +29,9 @@ Normally, run only `refresh_analysis.py` for saved data. It runs validation foll
 
 | Script | Purpose and output |
 | --- | --- |
-| `refresh_analysis.py` | Validates and analyzes `cpx_11360825`; produces the files under `analysis/`. |
+| `refresh_analysis.py` | Selects, validates, and analyzes a completed run; produces the files under `analysis/`. |
 | `generate_orders.py` | Creates the balanced device schedule in each node's `orders.tsv`. |
 | `validate_results.py` | Checks run completeness, partition and device maps, and result files; reports pass or fail. |
 | `analyze.py` | Calculates device and node averages, ranges, run variation, and common-launch comparisons; writes `analysis/SUMMARY.md` and supporting CSVs. |
 
-The summary includes node averages, within-package device comparisons, and L3 bandwidth at common launch settings. Keep or archive `runs/cpx_11360825` to regenerate the exact reported numbers; a new job produces new measurements. The `runs/`, `analysis/`, and `logs/` directories are generated locally and are not published.
+The summary includes node averages, within-package device comparisons, and L3 bandwidth at common launch settings. Keep or archive a run directory to regenerate its exact summary; a new job produces new measurements. The `runs/`, `analysis/`, and `logs/` directories are generated locally and are not published.
