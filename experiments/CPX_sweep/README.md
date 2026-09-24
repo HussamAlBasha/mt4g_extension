@@ -1,6 +1,6 @@
 # CPX device sweep (RQ3)
 
-This experiment compares L3 and main-memory latency and bandwidth across the twelve CPX devices on each of three MI300A nodes. Each node runs twelve sequential sweeps, giving 432 device runs. [The retained campaign summary](analysis/SUMMARY.md) reports the results.
+This experiment compares L3 and main-memory latency and bandwidth across the twelve CPX devices on each of three MI300A nodes. Each node runs twelve sequential sweeps, giving 432 device runs.
 
 ## Submit on the cluster
 
@@ -21,19 +21,17 @@ From `experiments/CPX_sweep`, with the retained `runs/cpx_11360825` data availab
 python3 refresh_analysis.py
 ```
 
-The command validates the 432 runs, checks the analysis calculations, and rebuilds the local results under `analysis/`. The analysis uses only the Python standard library.
+The command validates the 432 runs and rebuilds the descriptive results under `analysis/`. It calculates the twelve-run average for each device, within-package device ranges, package-balanced node averages, and common-launch comparisons. The analysis uses only the Python standard library.
 
 ## Python scripts
 
-Normally, run only `refresh_analysis.py` for saved data. It runs validation, tests, comparison, and summary in that order. `worker.sh` calls `generate_orders.py` during collection.
+Normally, run only `refresh_analysis.py` for saved data. It runs validation followed by analysis. `worker.sh` calls `generate_orders.py` during collection.
 
 | Script | Purpose and output |
 | --- | --- |
-| `refresh_analysis.py` | Runs the complete local analysis for `cpx_11360825`; produces the files under `analysis/`. |
+| `refresh_analysis.py` | Validates and analyzes `cpx_11360825`; produces the files under `analysis/`. |
 | `generate_orders.py` | Creates the balanced device schedule in each node's `orders.tsv`. |
 | `validate_results.py` | Checks run completeness, partition and device maps, and result files; reports pass or fail. |
-| `test_analysis.py` | Checks the order design and statistical calculations; reports pass or fail. |
-| `compare_results.py` | Calculates device averages and repeatability; writes `observations.csv`, `per_device.csv`, `device_effects.csv`, and `comparison.md`. |
-| `summarize_results.py` | Writes `analysis/SUMMARY.md`, node averages, and the common-launch comparison CSVs. |
+| `analyze.py` | Calculates device and node averages, ranges, run variation, and common-launch comparisons; writes `analysis/SUMMARY.md` and supporting CSVs. |
 
-The summary includes node averages, within-package device comparisons, and L3 bandwidth at common launch settings. Keep or archive `runs/cpx_11360825` to regenerate the exact reported numbers; a new job produces new measurements. `analysis/` and `logs/` are generated outputs.
+The summary includes node averages, within-package device comparisons, and L3 bandwidth at common launch settings. Keep or archive `runs/cpx_11360825` to regenerate the exact reported numbers; a new job produces new measurements. The `runs/`, `analysis/`, and `logs/` directories are generated locally and are not published.
